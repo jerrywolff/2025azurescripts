@@ -1,0 +1,55 @@
+﻿ connect-azaccount #-Identity controlmi  #-Environment AzureUSGovernment
+
+ import-module az.automation #-verbose
+
+
+# Login to Azure - if already logged in, use existing credentials.
+Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
+try
+{
+    $AzureLogin = Get-AzSubscription
+    $currentContext = Get-AzContext
+    $token = Get-AzAccessToken 
+    if($Token.ExpiresOn -lt $(get-date))
+    {
+        "Logging you out due to cached token is expired for REST AUTH.  Re-run script"
+        $null = Disconnect-AzAccount        
+    } 
+}
+catch
+{
+    $null = Login-AzAccount
+    $AzureLogin = Get-AzSubscription
+    $currentContext = Get-AzContext
+    $token = Get-AzAccessToken
+
+}
+ 
+ $automationaccounts = Get-AzAutomationAccount -Name wolffentpautoact  -ResourceGroupName jwgovernance
+ 
+ $running = (Get-AzAutomationJob -ResourceGroupName jwgovernance -AutomationAccountName wolffentpautoact -Status Suspended | Select-Object JobId)
+
+ $runbooks  = Get-AzAutomationRunbook -ResourceGroupName jwgovernance -AutomationAccountName wolffentpautoact
+
+ foreach($runbookid in  $runbooks )
+ {
+    Start-AzAutomationRunbook -Name $($runbookid.Name) -RunOn wolffhybridworkergroup -ResourceGroupName jwgovernance -AutomationAccountName wolffentpautoact 
+     
+ $running = (Get-AzAutomationJob -ResourceGroupName jwgovernance -AutomationAccountName wolffentpautoact | Select-Object JobId, status)
+} 
+
+
+<#
+
+  foreach($job in $running){
+   start-AzAutomationJob -ResourceGroupName jwgovernance -AutomationAccountName wolffentpautoact -Id $($Job.JobId) -Verbose 
+  }
+
+
+
+
+
+
+
+
+  #>
