@@ -1,0 +1,180 @@
+﻿<#
+.NOTES
+
+    THIS CODE-SAMPLE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED 
+    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR 
+    FITNESS FOR A PARTICULAR PURPOSE.
+
+    This sample is not supported under any Microsoft standard support program or service. 
+    The script is provided AS IS without warranty of any kind. Microsoft further disclaims all
+    implied warranties including, without limitation, any implied warranties of merchantability
+    or of fitness for a particular purpose. The arising out of the use or performance
+    of the sample and documentation remains with you. In no event shall Microsoft, its authors,
+    or anyone else involved in the creation, production, or delivery of the script be liable for 
+    any damages whatsoever (including, without limitation, damages for loss of business profits, 
+    business interruption, loss of business information, or other pecuniary loss) arising out of 
+    the use of or inability to use the sample or documentation, even if Microsoft has been advised 
+    of the possibility of such damages, rising out of the use of or inability to use the sample script, 
+    even if Microsoft has been advised of the possibility of such damages.
+
+    Purpose
+        The purpose of this Azure PowerShell script is to automate the process of managing VM extensions across 
+        multiple subscriptions. Specifically, it retrieves a certificate from Azure Key Vault and ensures that a 
+        specified VM extension is installed and configured on all VMs within the subscriptions.
+
+    Description
+        Define Parameters: Sets up necessary parameters such as resource group names, storage account names, 
+        key vault names, and extension names.
+        Authenticate and Set Context: Authenticates using managed identity and sets the Azure context for the
+        specified subscriptions.
+        Retrieve Certificate: Retrieves a specified certificate from Azure Key Vault.
+        List VMs: Retrieves a list of all VMs in the current subscription.
+        Check and Configure Extensions:
+        For each VM, checks if the specified extension is already installed.
+        If the extension is not present, retrieves the latest extension details and installs the extension with
+        the necessary settings.
+        If the extension is present, reconfigures it with the updated settings.
+        Settings Configuration: Configures the extension settings to manage certificates and authentication settings.
+        This script ensures that all VMs across multiple subscriptions have the specified VM extension installed and 
+        configured with the latest settings, including certificate management from Azure Key Vault.
+
+Name: trigger_certificate_extension_to_keyvault_for_azconnected_machines
+
+
+###############   Make sure to make the changes in the variable settings section befor running 
+
+#>
+
+
+
+
+
+###########   Variable settings ########################################
+# Define parameters
+$resourceGroupName = "wolffextensionrg"
+$storageAccountName = "wolffextensionsa"
+$keyvaultrg = "adminrg"
+$keyvault = "wolffkv"
+$extensionName = "KeyVaultForWindows"
+#$extensionName = "AdminCenter"
+
+$subscriptions = Get-AzSubscription -SubscriptionName "wolffentpsub"
+
+
+##########################################################################
+$loginContext = Connect-AzAccount -Identity
+
+$certificateAuth = "wolffautomationsp"
+
+az login --identity --scope https://management.core.windows.net//.default
+
+Set-AzContext -Tenant $($loginContext.Context.Tenant.TenantId) -Subscription $($loginContext.Context.Subscription.Name)
+
+foreach ($sub in $subscriptions) {
+    $subContext = Set-AzContext -Subscription $($sub.Name)
+
+    $certKeyVault = Get-AzKeyVault -VaultName "$keyvault" -ResourceGroupName "$keyvaultrg" -SubscriptionId $($subContext.Subscription.Id)
+
+    # Retrieve certificate
+    $certificate = Get-AzKeyVaultSecret -VaultName $($certKeyVault.VaultName) -Name $certificateAuth
+
+   $arcMachines = Get-AzConnectedMachine 
+$arcMachines
+
+        foreach($vm in $arcMachines) {
+        Write-Host "Checking $($vm.Name)" -ForegroundColor Red -BackgroundColor White
+
+                    $Settings = @{
+                        secretsManagementSettings = @{
+                            observedCertificates = @(
+                                "https://$certKeyVault.Vault.azure.net/secrets/$($certificate.Name)"
+                            )
+                        }
+                        authenticationSettings = @{
+                            msiEndpoint = "http://localhost:40342/metadata/identity"
+                        }
+                        certificateStoreLocation = "LocalMachine"
+                        certificateStoreName = "My"
+                    }
+
+        $extensionInfo = Get-AzConnectedMachineExtension -ResourceGroupName $($vm.ResourceGroupName) -machinename $($vm.Name)   | Where-Object { $_.Name -eq "$extensionName" }
+        $extensionInfo
+
+        if ($extensionInfo -ne $null) {
+            $typeHandlerVersion = "$($extensionInfo.TypeHandlerVersion)"
+        }
+
+        Write-Host "$($extensionInfo.Name) $($extensionInfo.Publisher) $($extensionInfo.Version) $($extensionInfo.TypeHandlerVersion)" -ForegroundColor Cyan
+
+        if ($extensionInfo -eq $null) {
+            Write-Host "$extensionName is not present on $($vm.Name) - Adding" -ForegroundColor Black -BackgroundColor White
+
+            # Get the latest extension details
+            $latestExtension = az vm extension image list `
+                --location $($vm.Location) `
+                --query "[?name=='$extensionName'] | sort_by(@, &version) | [-1]" `
+                --output json | ConvertFrom-Json
+
+            if ($latestExtension -ne $null) {
+                $publisher = $latestExtension.publisher
+                $version = $latestExtension.version
+
+                # Get detailed information about the extension
+                $extensionDetails = az vm extension image show `
+                    --location $($vm.Location) `
+                    --publisher $publisher `
+                    --name $extensionName `
+                    --version $version `
+                    --output json | ConvertFrom-Json
+
+                if ($extensionDetails -ne $null) {
+                    # Extract the extension type from the id property
+                    $extensionType = ($extensionDetails.id -split '/Types/')[1] -split '/Versions/'[0]
+
+                    # Create a new PSObject to store the extension information
+                    $extensionInfoObj = New-Object PSObject
+                    $extensionInfoObj | Add-Member -MemberType NoteProperty -Name Name -Value $extensionName
+                    $extensionInfoObj | Add-Member -MemberType NoteProperty -Name Publisher -Value $publisher
+                    $extensionInfoObj | Add-Member -MemberType NoteProperty -Name TypeHandlerVersion -Value $typeHandlerVersion
+                    $extensionInfoObj | Add-Member -MemberType NoteProperty -Name ExtensionType -Value $($extensionType[0])
+
+                    $extensionInfo = $extensionInfoObj
+
+                    # Add the extension to the VM
+                    New-AzConnectedMachineExtension -ResourceGroupName $($vm.ResourceGroupName) `
+                        -MachineName $($vm.Name) `
+                        -Name "KeyVaultForWindows" `
+                        -Location $($vm.Location) `
+                        -Publisher "Microsoft.Azure.KeyVault" `
+                        -ExtensionType "KeyVaultForWindows" `
+                        -Setting $Settings
+
+                  $extensionInfo = Get-AzConnectedMachineExtension -ResourceGroupName $($vm.ResourceGroupName) -machinename $($vm.Name)   | Where-Object { $_.Name -eq "$extensionName" }
+                      $extensionInfo
+
+
+                } else {
+                    Write-Host "Failed to retrieve extension details." -ForegroundColor Red
+                }
+            } else {
+                Write-Host "Failed to retrieve the latest extension." -ForegroundColor Red
+            }
+        }
+
+     # Re-add and run extension
+        if ($extensionInfo -ne $null) {
+          Set-AzConnectedMachineExtension -ResourceGroupName "$($vm.ResourceGroupName)" `
+                -Location "$($vm.Location)" `
+                -MachineName "$($vm.Name)" `
+                -Name "$($extensionInfo.Name)" `
+                -Publisher "$($extensionInfo.Publisher)" `
+                -ExtensionType "KeyVaultForWindows" `
+                -Settings $Settings `
+                -ForceRerun "true"
+        } else {
+            Write-Host "Extension information is missing. Skipping VM $($vm.Name)." -ForegroundColor Red
+        }  
+
+ 
+    }
+}
